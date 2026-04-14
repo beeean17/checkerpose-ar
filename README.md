@@ -9,7 +9,7 @@ The app combines Flutter for the UI, Chaquopy for the Android-Python bridge, and
 
 ### Screenshot
 
-![Example Screenshot](example/example_picture.jpg)
+<img src="example/example_picture.jpg" alt="Example Screenshot" width="320" />
 
 ### Video
 

@@ -9,7 +9,7 @@ CheckerPose AR는 체커보드 패턴을 기준으로 카메라의 자세를 추
 
 ### 스크린샷
 
-![예시 스크린샷](example/example_picture.jpg)
+<img src="example/example_picture.jpg" alt="예시 스크린샷" width="320" />
 
 ### 영상
 
