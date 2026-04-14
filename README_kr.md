@@ -9,11 +9,20 @@ CheckerPose AR는 체커보드 패턴을 기준으로 카메라의 자세를 추
 
 ### 스크린샷
 
-> TODO: 여기에 AR 결과 스크린샷을 추가하세요.
+![예시 스크린샷](example/example_picture.jpg)
 
 ### 영상
 
-> TODO: 여기에 데모 영상 링크 또는 GIF를 추가하세요.
+![예시 GIF](example/example.gif)
+
+데모 영상 파일: [example_video.mp4](example/example_video.mp4)
+
+## 예시 자료
+
+- 데모 GIF: [example/example.gif](example/example.gif)
+- 데모 스크린샷: [example/example_picture.jpg](example/example_picture.jpg)
+- 데모 영상: [example/example_video.mp4](example/example_video.mp4)
+- 캘리브레이션 결과 예시 JSON: [example/calibration_example.json](example/calibration_example.json)
 
 ## 프로젝트 개요
 

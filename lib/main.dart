@@ -84,6 +84,26 @@ Uint8List _framePacketToPreviewBytes(_FramePacket packet) {
   return Uint8List.fromList(img.encodeJpg(image, quality: 78));
 }
 
+Uint8List? _encodedImageToPreviewBytes(Uint8List fileBytes) {
+  final decoded = img.decodeImage(fileBytes);
+  if (decoded == null) {
+    return null;
+  }
+
+  var preview = decoded;
+  const maxDimension = 320;
+  if (preview.width > maxDimension || preview.height > maxDimension) {
+    preview = img.copyResize(
+      preview,
+      width: preview.width >= preview.height ? maxDimension : null,
+      height: preview.height > preview.width ? maxDimension : null,
+      interpolation: img.Interpolation.linear,
+    );
+  }
+
+  return Uint8List.fromList(img.encodeJpg(preview, quality: 78));
+}
+
 class _DecodeResult {
   const _DecodeResult({
     required this.grayBytes,
@@ -854,7 +874,6 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
   );
 
   CameraController? _cameraController;
-  _FramePacket? _latestFrame;
   _CalibrationResult? _calibration;
   final List<_CalibrationSample> _calibrationFrames = <_CalibrationSample>[];
 
@@ -862,6 +881,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
   bool _initializingCamera = false;
   Future<void>? _pendingCameraDisposal;
   bool _runningCalibration = false;
+  bool _capturingSample = false;
   int? _selectedCalibrationSampleIndex;
   String _statusMessage = '카메라를 준비하는 중입니다.';
   String? _calibrationDirectoryPath;
@@ -948,8 +968,6 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
       );
       await controller.initialize();
       await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
-      await controller.startImageStream(_onFrameAvailable);
-
       final calibration = await _loadCalibrationFromDisk(backCamera);
       final savedSamples = await _loadSavedCalibrationSamples();
 
@@ -1002,23 +1020,6 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
     }
   }
 
-  void _onFrameAvailable(CameraImage image) {
-    if (image.planes.isEmpty) {
-      return;
-    }
-    final controller = _cameraController;
-    if (controller == null) {
-      return;
-    }
-    _latestFrame = _FramePacket(
-      bytes: Uint8List.fromList(image.planes.first.bytes),
-      width: image.width,
-      height: image.height,
-      bytesPerRow: image.planes.first.bytesPerRow,
-      rotationDegrees: controller.description.sensorOrientation,
-    );
-  }
-
   // --- Board validation ----------------------------------------------------
 
   String? _validateBoardInputs() {
@@ -1037,19 +1038,13 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
   // --- Capture / gallery ---------------------------------------------------
 
   Future<void> _captureCalibrationFrame() async {
-    final latestFrame = _latestFrame;
-    if (latestFrame == null) {
-      _showSnackBar('아직 카메라 프레임이 준비되지 않았습니다.');
-      return;
-    }
-
     final validationError = _validateBoardInputs();
     if (validationError != null) {
       _showSnackBar(validationError);
       return;
     }
 
-    if (_runningCalibration) {
+    if (_runningCalibration || _capturingSample) {
       return;
     }
 
@@ -1059,17 +1054,41 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
     }
 
     final nextIndex = _calibrationFrames.length + 1;
-    final sample = await _buildCalibrationSample(latestFrame, nextIndex);
-    await _deleteCalibrationFileIfExists();
-
     setState(() {
-      _calibration = null;
-      _calibrationFrames.add(sample);
-      _selectedCalibrationSampleIndex = _calibrationFrames.length - 1;
-      _statusMessage = _calibrationFrames.length == _requiredCalibrationSamples
-          ? '20장 수집 완료. 샘플을 미리보고 수정한 뒤 Run Calibration을 누르세요.'
-          : '캘리브레이션 샘플 $nextIndex/$_requiredCalibrationSamples 저장 완료: ${sample.filePath}';
+      _capturingSample = true;
+      _statusMessage = '고해상도 샘플을 촬영하는 중입니다.';
     });
+
+    try {
+      final stillBytes = await _captureStillImageBytes();
+      if (stillBytes == null) {
+        _showSnackBar('고해상도 샘플 촬영에 실패했습니다.');
+        return;
+      }
+
+      final sample =
+          await _buildCalibrationSampleFromEncodedImage(stillBytes, nextIndex);
+      await _deleteCalibrationFileIfExists();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _calibration = null;
+        _calibrationFrames.add(sample);
+        _selectedCalibrationSampleIndex = _calibrationFrames.length - 1;
+        _statusMessage = _calibrationFrames.length == _requiredCalibrationSamples
+            ? '20장 수집 완료. 샘플을 미리보고 수정한 뒤 Run Calibration을 누르세요.'
+            : '캘리브레이션 샘플 $nextIndex/$_requiredCalibrationSamples 저장 완료: ${sample.filePath}';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _capturingSample = false;
+        });
+      }
+    }
   }
 
   Future<void> _pickImagesFromGallery() async {
@@ -1108,22 +1127,9 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
 
       try {
         final fileBytes = await pickedFile.readAsBytes();
-        
-        final result = await compute(_decodeAndGrayscaleImage, fileBytes);
-        if (result == null) {
-          continue;
-        }
-
-        final packet = _FramePacket(
-          bytes: result.grayBytes,
-          width: result.width,
-          height: result.height,
-          bytesPerRow: result.width,
-          rotationDegrees: 0,
-        );
-
         final nextIndex = _calibrationFrames.length + 1;
-        final sample = await _buildCalibrationSample(packet, nextIndex);
+        final sample =
+            await _buildCalibrationSampleFromEncodedImage(fileBytes, nextIndex);
 
         setState(() {
           _calibration = null;
@@ -1227,15 +1233,10 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
 
   Future<void> _replaceSelectedCalibrationSample() async {
     final selectedIndex = _selectedCalibrationSampleIndex;
-    final latestFrame = _latestFrame;
     if (selectedIndex == null ||
         selectedIndex < 0 ||
         selectedIndex >= _calibrationFrames.length) {
       _showSnackBar('먼저 수정할 샘플을 선택하세요.');
-      return;
-    }
-    if (latestFrame == null) {
-      _showSnackBar('아직 카메라 프레임이 준비되지 않았습니다.');
       return;
     }
 
@@ -1245,19 +1246,44 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
       return;
     }
 
-    final sample =
-        await _buildCalibrationSample(latestFrame, selectedIndex + 1);
-    await _deleteCalibrationFileIfExists();
-
-    if (!mounted) {
+    if (_runningCalibration || _capturingSample) {
       return;
     }
 
     setState(() {
-      _calibrationFrames[selectedIndex] = sample;
-      _calibration = null;
-      _statusMessage = '샘플 ${selectedIndex + 1}번을 현재 프레임으로 교체했습니다.';
+      _capturingSample = true;
+      _statusMessage = '선택한 샘플을 고해상도 사진으로 교체하는 중입니다.';
     });
+
+    try {
+      final stillBytes = await _captureStillImageBytes();
+      if (stillBytes == null) {
+        _showSnackBar('고해상도 샘플 촬영에 실패했습니다.');
+        return;
+      }
+
+      final sample = await _buildCalibrationSampleFromEncodedImage(
+        stillBytes,
+        selectedIndex + 1,
+      );
+      await _deleteCalibrationFileIfExists();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _calibrationFrames[selectedIndex] = sample;
+        _calibration = null;
+        _statusMessage = '샘플 ${selectedIndex + 1}번을 고해상도 사진으로 교체했습니다.';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _capturingSample = false;
+        });
+      }
+    }
   }
 
   Future<void> _clearCalibrationSamples() async {
@@ -1344,17 +1370,56 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
     return file;
   }
 
-  Future<_CalibrationSample> _buildCalibrationSample(
-    _FramePacket packet,
+  Future<_CalibrationSample> _buildCalibrationSampleFromEncodedImage(
+    Uint8List encodedBytes,
     int index,
   ) async {
-    final clonedPacket = packet.clone();
-    final savedFile = await _saveCalibrationSample(clonedPacket, index);
+    final result = await compute(_decodeAndGrayscaleImage, encodedBytes);
+    if (result == null) {
+      throw StateError('이미지를 디코딩할 수 없습니다.');
+    }
+
+    final packet = _FramePacket(
+      bytes: result.grayBytes,
+      width: result.width,
+      height: result.height,
+      bytesPerRow: result.width,
+      rotationDegrees: 0,
+    );
+    final savedFile = await _saveCalibrationSample(packet.clone(), index);
+
     return _CalibrationSample(
-      packet: clonedPacket,
-      previewBytes: _framePacketToPreviewBytes(clonedPacket),
+      packet: packet,
+      previewBytes:
+          _encodedImageToPreviewBytes(encodedBytes) ??
+          _framePacketToPreviewBytes(packet),
       filePath: savedFile.path,
     );
+  }
+
+  Future<Uint8List?> _captureStillImageBytes() async {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) {
+      return null;
+    }
+
+    XFile? capturedFile;
+    try {
+      capturedFile = await controller.takePicture();
+      final bytes = await capturedFile.readAsBytes();
+      return bytes;
+    } on CameraException {
+      return null;
+    } finally {
+      if (capturedFile != null) {
+        try {
+          final tempFile = File(capturedFile.path);
+          if (tempFile.existsSync()) {
+            await tempFile.delete();
+          }
+        } catch (_) {}
+      }
+    }
   }
 
   Future<void> _deleteCalibrationFileIfExists() async {
@@ -1464,6 +1529,8 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
             _selectedCalibrationSampleIndex! < _calibrationFrames.length
         ? _calibrationFrames[_selectedCalibrationSampleIndex!]
         : null;
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final previewHeight = (screenHeight * 0.34).clamp(220.0, 320.0).toDouble();
 
     return PopScope(
       canPop: false,
@@ -1487,16 +1554,33 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
             if (_cameraReady &&
                 _cameraController != null &&
                 _cameraController!.value.isInitialized)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: AspectRatio(
-                  aspectRatio: 1 / _cameraController!.value.aspectRatio,
-                  child: CameraPreview(_cameraController!),
-                ),
+              Builder(
+                builder: (context) {
+                  final previewSize = _cameraController!.value.previewSize;
+                  final previewWidth = previewSize?.height ?? 720.0;
+                  final previewInnerHeight = previewSize?.width ??
+                      previewWidth * _cameraController!.value.aspectRatio;
+
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: SizedBox(
+                      height: previewHeight,
+                      width: double.infinity,
+                      child: FittedBox(
+                        fit: BoxFit.cover,
+                        child: SizedBox(
+                          width: previewWidth,
+                          height: previewInnerHeight,
+                          child: CameraPreview(_cameraController!),
+                        ),
+                      ),
+                    ),
+                  );
+                },
               )
             else
               Container(
-                height: 200,
+                height: previewHeight,
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(16),
@@ -1586,6 +1670,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
                           child: FilledButton(
                             onPressed: _cameraReady &&
                                     !_runningCalibration &&
+                                    !_capturingSample &&
                                     (!calibrationReady ||
                                         _calibrationFrames.isNotEmpty) &&
                                     _calibrationFrames.length <
@@ -1599,6 +1684,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
                         Expanded(
                           child: FilledButton(
                             onPressed: !_runningCalibration &&
+                                    !_capturingSample &&
                                     _calibrationFrames.length <
                                         _requiredCalibrationSamples
                                 ? () => unawaited(_pickImagesFromGallery())
@@ -1610,6 +1696,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
                         Expanded(
                           child: FilledButton.tonal(
                             onPressed: _runningCalibration ||
+                                    _capturingSample ||
                                     _calibrationFrames.length <
                                         _requiredCalibrationSamples
                                 ? null
@@ -1629,6 +1716,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
                         Expanded(
                           child: OutlinedButton(
                             onPressed: !_runningCalibration &&
+                                    !_capturingSample &&
                                     selectedSample != null &&
                                     _cameraReady
                                 ? () => unawaited(
@@ -1641,6 +1729,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
                         Expanded(
                           child: OutlinedButton(
                             onPressed: !_runningCalibration &&
+                                    !_capturingSample &&
                                     _calibrationFrames.isNotEmpty
                                 ? () => unawaited(_clearCalibrationSamples())
                                 : null,
@@ -1652,6 +1741,7 @@ class _CalibrationScreenState extends State<_CalibrationScreen>
                     const SizedBox(height: 12),
                     FilledButton.tonal(
                       onPressed: !_runningCalibration
+                              && !_capturingSample
                           ? () => unawaited(_startCalibrationFromScratch())
                           : null,
                       child: const Text('처음부터 새로 시작'),

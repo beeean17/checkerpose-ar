@@ -9,11 +9,20 @@ The app combines Flutter for the UI, Chaquopy for the Android-Python bridge, and
 
 ### Screenshot
 
-> TODO: Add a screenshot of the AR result here.
+![Example Screenshot](example/example_picture.jpg)
 
 ### Video
 
-> TODO: Add a demo video link or GIF here.
+![Example GIF](example/example.gif)
+
+Download the demo video here: [example_video.mp4](example/example_video.mp4)
+
+## Example Assets
+
+- Demo GIF: [example/example.gif](example/example.gif)
+- Demo screenshot: [example/example_picture.jpg](example/example_picture.jpg)
+- Demo video: [example/example_video.mp4](example/example_video.mp4)
+- Example calibration result: [example/calibration_example.json](example/calibration_example.json)
 
 ## Overview
 
