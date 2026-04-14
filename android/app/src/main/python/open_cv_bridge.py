@@ -280,10 +280,10 @@ def _standing_image_plane(board_pattern: tuple[int, int], board_cellsize: float)
     # so the image looks like a vertical billboard.
     return np.asarray(
         [
-            [origin_x, origin_y, 0.0],
-            [origin_x + plane_width, origin_y, 0.0],
-            [origin_x + plane_width, origin_y, -plane_height],
-            [origin_x, origin_y, -plane_height],
+            [origin_x, origin_y, -plane_height],                  # Top-Left
+            [origin_x + plane_width, origin_y, -plane_height],    # Top-Right
+            [origin_x + plane_width, origin_y, 0.0],              # Bottom-Right
+            [origin_x, origin_y, 0.0],                            # Bottom-Left
         ],
         dtype=np.float32,
     )

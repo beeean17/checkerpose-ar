@@ -25,10 +25,10 @@ class ArPainter extends CustomPainter {
         .toList(growable: false);
 
     final shadow = Path()
-      ..moveTo(quad[0].dx, quad[0].dy)
-      ..lineTo(quad[1].dx, quad[1].dy)
-      ..lineTo(quad[1].dx + 18, quad[1].dy + 8)
-      ..lineTo(quad[0].dx + 18, quad[0].dy + 8)
+      ..moveTo(quad[3].dx, quad[3].dy)
+      ..lineTo(quad[2].dx, quad[2].dy)
+      ..lineTo(quad[2].dx + 18, quad[2].dy + 8)
+      ..lineTo(quad[3].dx + 18, quad[3].dy + 8)
       ..close();
     canvas.drawPath(
       shadow,
