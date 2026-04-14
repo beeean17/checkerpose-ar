@@ -138,6 +138,8 @@ flutter pub get
 flutter run
 ```
 
+For a prebuilt release APK, please refer to the GitHub Releases page.
+
 ## Calibration Workflow
 
 1. Open the calibration screen

@@ -141,6 +141,8 @@ flutter pub get
 flutter run
 ```
 
+미리 빌드된 release APK는 GitHub Releases 페이지를 참고하세요.
+
 ## 캘리브레이션 절차
 
 1. 캘리브레이션 화면으로 이동
