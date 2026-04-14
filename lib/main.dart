@@ -233,7 +233,7 @@ class CheckerPoseHomePage extends StatefulWidget {
 class _CheckerPoseHomePageState extends State<CheckerPoseHomePage>
     with WidgetsBindingObserver {
   CameraController? _cameraController;
-  _FramePacket? _latestFrame;
+  _FramePacket? _pendingPoseFrame;
   _CalibrationResult? _calibration;
   _PoseResult? _poseResult;
   final Map<String, ui.Image> _posterImages = <String, ui.Image>{};
@@ -276,6 +276,7 @@ class _CheckerPoseHomePageState extends State<CheckerPoseHomePage>
     if (state == AppLifecycleState.inactive) {
       _cameraController = null;
       _cameraReady = false;
+      _pendingPoseFrame = null;
       if (mounted) {
         setState(() {});
       }
@@ -408,43 +409,71 @@ class _CheckerPoseHomePageState extends State<CheckerPoseHomePage>
       bytesPerRow: image.planes.first.bytesPerRow,
       rotationDegrees: controller.description.sensorOrientation,
     );
-    _latestFrame = packet;
+    _pendingPoseFrame = packet;
 
     final calibration = _calibration;
     if (calibration == null || _processingPose) {
       return;
     }
 
+    unawaited(_processLatestPoseLoop());
+  }
+
+  Future<void> _processLatestPoseLoop() async {
+    if (_processingPose) {
+      return;
+    }
+
     _processingPose = true;
     try {
-      final result = await _pythonChannel.invokeMethod<Object?>(
-        'getArPose',
-        <String, Object?>{
-          'frame': packet.toMap(),
-          'calibration': calibration.toMap(),
-          'boardCols': calibration.boardCols,
-          'boardRows': calibration.boardRows,
-          'squareSizeMm': calibration.squareSizeMm,
-        },
-      );
+      while (mounted) {
+        final calibration = _calibration;
+        final packet = _pendingPoseFrame;
+        _pendingPoseFrame = null;
 
-      if (!mounted) {
-        return;
-      }
+        if (calibration == null || packet == null) {
+          break;
+        }
 
-      final map = _normalizeMap(result);
-      setState(() {
-        _poseResult = _PoseResult.fromMap(map);
-        _statusMessage = _poseResult?.message ??
-            '체커보드를 찾지 못했습니다. 프레임 안에 전체 패턴이 보이도록 맞춰주세요.';
-      });
-    } on PlatformException catch (error) {
-      if (!mounted) {
-        return;
+        try {
+          final result = await _pythonChannel.invokeMethod<Object?>(
+            'getArPose',
+            <String, Object?>{
+              'frame': packet.toMap(),
+              'calibration': calibration.toMap(),
+              'boardCols': calibration.boardCols,
+              'boardRows': calibration.boardRows,
+              'squareSizeMm': calibration.squareSizeMm,
+            },
+          );
+
+          if (!mounted) {
+            return;
+          }
+
+          final map = _normalizeMap(result);
+          setState(() {
+            final nextPose = _PoseResult.fromMap(map);
+            _poseResult = _poseResult == null
+                ? nextPose
+                : _poseResult!.stabilizedWith(nextPose);
+            _statusMessage = _poseResult?.message ??
+                '체커보드를 찾지 못했습니다. 프레임 안에 전체 패턴이 보이도록 맞춰주세요.';
+          });
+        } on PlatformException catch (error) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _statusMessage = error.message ?? error.code;
+          });
+          break;
+        }
+
+        if (_pendingPoseFrame == null) {
+          break;
+        }
       }
-      setState(() {
-        _statusMessage = error.message ?? error.code;
-      });
     } finally {
       _processingPose = false;
     }
@@ -457,6 +486,7 @@ class _CheckerPoseHomePageState extends State<CheckerPoseHomePage>
     final controller = _cameraController;
     _cameraController = null;
     _cameraReady = false;
+    _pendingPoseFrame = null;
     setState(() {});
     await _disposeCameraController(controller);
 
@@ -641,7 +671,7 @@ class _CheckerPoseHomePageState extends State<CheckerPoseHomePage>
                 children: <Widget>[
                   Expanded(
                     child: DropdownButtonFormField<String>(
-                      value: _customPosterImage != null
+                      initialValue: _customPosterImage != null
                           ? null
                           : _selectedPoster,
                       decoration: const InputDecoration(
@@ -796,11 +826,6 @@ class _CheckerPoseHomePageState extends State<CheckerPoseHomePage>
     return recorder.endRecording().toImage(640, 960);
   }
 
-  void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1998,6 +2023,8 @@ class _PoseResult {
   final List<double> tvec;
   final List<double> cameraPosition;
 
+  static const double _vectorSmoothingAlpha = 0.22;
+
   factory _PoseResult.fromMap(Map<String, dynamic> map) {
     final quad = <Offset>[];
     final quadPayload = map['quad'];
@@ -2022,5 +2049,40 @@ class _PoseResult {
       tvec: _toDoubleList(map['tvec']),
       cameraPosition: _toDoubleList(map['cameraPosition']),
     );
+  }
+
+  _PoseResult stabilizedWith(_PoseResult next) {
+    if (!found || !next.found) {
+      return next;
+    }
+    if (quad.length != 4 || next.quad.length != 4) {
+      return next;
+    }
+
+    return _PoseResult(
+      found: true,
+      message: next.message,
+      quad: next.quad,
+      rvec: _lerpDoubleList(rvec, next.rvec, _vectorSmoothingAlpha),
+      tvec: _lerpDoubleList(tvec, next.tvec, _vectorSmoothingAlpha),
+      cameraPosition: _lerpDoubleList(
+        cameraPosition,
+        next.cameraPosition,
+        _vectorSmoothingAlpha,
+      ),
+    );
+  }
+
+  static List<double> _lerpDoubleList(
+    List<double> previous,
+    List<double> next,
+    double alpha,
+  ) {
+    if (previous.length != next.length) {
+      return next;
+    }
+    return List<double>.generate(previous.length, (index) {
+      return previous[index] + (next[index] - previous[index]) * alpha;
+    }, growable: false);
   }
 }

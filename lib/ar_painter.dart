@@ -20,9 +20,10 @@ class ArPainter extends CustomPainter {
       return;
     }
 
-    final quad = normalizedQuad
+    final rawQuad = normalizedQuad
         .map((point) => Offset(point.dx * size.width, point.dy * size.height))
         .toList(growable: false);
+    final quad = _posterDestinationQuad(rawQuad);
 
     final shadow = Path()
       ..moveTo(quad[3].dx, quad[3].dy)
@@ -49,14 +50,6 @@ class ArPainter extends CustomPainter {
     canvas.transform(transform);
     canvas.drawImage(posterImage!, Offset.zero, Paint()..filterQuality = FilterQuality.high);
     canvas.restore();
-
-    canvas.drawPath(
-      _quadPath(quad),
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5
-        ..color = Colors.white.withValues(alpha: 0.8),
-    );
   }
 
   @override
@@ -73,6 +66,51 @@ class ArPainter extends CustomPainter {
       ..lineTo(quad[2].dx, quad[2].dy)
       ..lineTo(quad[3].dx, quad[3].dy)
       ..close();
+  }
+
+  List<Offset> _posterDestinationQuad(List<Offset> rawQuad) {
+    if (rawQuad.length != 4) {
+      return rawQuad;
+    }
+
+    final center = rawQuad.reduce((sum, point) => sum + point) / 4.0;
+    final ordered = List<Offset>.from(rawQuad)
+      ..sort((a, b) {
+        final angleA = _angleAround(center, a);
+        final angleB = _angleAround(center, b);
+        return angleA.compareTo(angleB);
+      });
+
+    final topLeftIndex = _indexOfMin(
+      ordered.map((point) => point.dx + point.dy).toList(growable: false),
+    );
+    final rotated = List<Offset>.generate(
+      4,
+      (index) => ordered[(topLeftIndex + index) % 4],
+      growable: false,
+    );
+
+    if (rotated[1].dx < rotated[3].dx) {
+      return <Offset>[rotated[0], rotated[3], rotated[2], rotated[1]];
+    }
+
+    return rotated;
+  }
+
+  double _angleAround(Offset center, Offset point) {
+    return (point - center).direction;
+  }
+
+  int _indexOfMin(List<double> values) {
+    var index = 0;
+    var minValue = values[0];
+    for (var i = 1; i < values.length; i++) {
+      if (values[i] < minValue) {
+        minValue = values[i];
+        index = i;
+      }
+    }
+    return index;
   }
 
   Float64List? _buildPerspectiveTransform({

@@ -219,6 +219,10 @@ pubspec.lock
 build/
 .flutter-plugins-dependencies
 
+# Android release signing
+android/key.properties
+android/app/upload-keystore.jks
+
 # Android / Gradle
 .idea/
 android/.gradle/
@@ -253,4 +257,3 @@ Desktop.ini
 # Re-include Flutter source directory which collides with Python package ignores.
 !lib/
 !lib/**
-

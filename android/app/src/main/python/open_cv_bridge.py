@@ -28,6 +28,20 @@ BOARD_FLAGS = (
     + cv.CALIB_CB_FAST_CHECK
 )
 
+SUBPIX_CRITERIA = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+FLOW_CRITERIA = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_COUNT, 20, 0.03)
+MIN_TRACK_RATIO = 0.85
+ROI_MARGIN_RATIO = 0.18
+REDETECT_INTERVAL = 8
+
+_runtime_state: dict[str, Any] = {
+    "board_pattern": None,
+    "gray_shape": None,
+    "prev_gray": None,
+    "prev_points": None,
+    "tracked_frames": 0,
+}
+
 
 def calibrate_camera(
     image_list: Any,
@@ -104,12 +118,31 @@ def get_ar_pose(
     board_pattern = (int(board_cols), int(board_rows))
     board_cellsize = float(square_size_mm)
     gray = _decode_gray_frame(frame, resize_scale)
+    _prepare_runtime_state(gray, board_pattern)
 
-    complete, img_points = _find_chessboard(gray, board_pattern)
-    if not complete:
+    tracking_mode = "detect"
+    complete, img_points = _track_chessboard(gray)
+    if complete:
+        tracking_mode = "track"
+        if int(_runtime_state.get("tracked_frames", 0)) >= REDETECT_INTERVAL:
+            redetected, redetected_points, used_roi = _detect_chessboard(gray, board_pattern)
+            if redetected and redetected_points is not None:
+                complete = True
+                img_points = redetected_points
+                tracking_mode = "roi-redetect" if used_roi else "detect"
+    else:
+        complete, img_points, used_roi = _detect_chessboard(gray, board_pattern)
+        if complete and used_roi:
+            tracking_mode = "roi-redetect"
+        elif complete:
+            tracking_mode = "detect"
+
+    if not complete or img_points is None:
+        _update_runtime_state(gray, None)
         return json.dumps({
             "found": False,
             "message": "Chessboard not found.",
+            "trackingMode": "lost",
         })
 
     object_points = _board_object_points(board_pattern, board_cellsize)
@@ -118,10 +151,18 @@ def get_ar_pose(
 
     solved, rvec, tvec = cv.solvePnP(object_points, img_points, camera_matrix, dist_coeffs)
     if not solved:
+        _update_runtime_state(gray, img_points, tracked=tracking_mode == "track")
         return json.dumps({
             "found": False,
             "message": "solvePnP failed.",
+            "trackingMode": tracking_mode,
         })
+
+    _update_runtime_state(
+        gray,
+        img_points,
+        tracked=tracking_mode == "track",
+    )
 
     ar_plane = _standing_image_plane(board_pattern, board_cellsize)
     projected, _ = cv.projectPoints(ar_plane, rvec, tvec, camera_matrix, dist_coeffs)
@@ -133,7 +174,8 @@ def get_ar_pose(
 
     return json.dumps({
         "found": True,
-        "message": "Pose tracked.",
+        "message": f"Pose tracked ({tracking_mode}).",
+        "trackingMode": tracking_mode,
         "rvec": rvec.reshape(-1).tolist(),
         "tvec": tvec.reshape(-1).tolist(),
         "cameraPosition": camera_position.tolist(),
@@ -197,9 +239,113 @@ def _find_chessboard(gray: np.ndarray, board_pattern: tuple[int, int]) -> tuple[
     if pts.dtype != np.float32:
         pts = pts.astype(np.float32)
 
-    criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-    refined = cv.cornerSubPix(gray, pts, (11, 11), (-1, -1), criteria)
+    refined = cv.cornerSubPix(gray, pts, (11, 11), (-1, -1), SUBPIX_CRITERIA)
     return True, refined
+
+
+def _prepare_runtime_state(gray: np.ndarray, board_pattern: tuple[int, int]) -> None:
+    if _runtime_state["board_pattern"] != board_pattern or _runtime_state["gray_shape"] != gray.shape:
+        _runtime_state["board_pattern"] = board_pattern
+        _runtime_state["gray_shape"] = gray.shape
+        _runtime_state["prev_gray"] = None
+        _runtime_state["prev_points"] = None
+        _runtime_state["tracked_frames"] = 0
+
+
+def _update_runtime_state(gray: np.ndarray, img_points: np.ndarray | None, tracked: bool = False) -> None:
+    _runtime_state["prev_gray"] = gray
+    _runtime_state["prev_points"] = img_points.astype(np.float32) if img_points is not None else None
+    _runtime_state["tracked_frames"] = int(_runtime_state.get("tracked_frames", 0)) + 1 if tracked else 0
+
+
+def _track_chessboard(gray: np.ndarray) -> tuple[bool, np.ndarray | None]:
+    prev_gray = _runtime_state.get("prev_gray")
+    prev_points = _runtime_state.get("prev_points")
+    if prev_gray is None or prev_points is None:
+        return False, None
+    if prev_gray.shape != gray.shape:
+        return False, None
+
+    tracked_points, status, _ = cv.calcOpticalFlowPyrLK(
+        prev_gray,
+        gray,
+        prev_points,
+        None,
+        winSize=(21, 21),
+        maxLevel=3,
+        criteria=FLOW_CRITERIA,
+    )
+    if tracked_points is None or status is None:
+        return False, None
+
+    status_mask = status.reshape(-1).astype(bool)
+    track_ratio = float(np.count_nonzero(status_mask)) / float(len(status_mask))
+    if track_ratio < MIN_TRACK_RATIO:
+        return False, None
+
+    good_prev = prev_points[status_mask].reshape(-1, 1, 2)
+    good_next = tracked_points[status_mask].reshape(-1, 1, 2)
+    homography, _ = cv.findHomography(good_prev, good_next, cv.RANSAC, 3.0)
+    if homography is None:
+        return False, None
+
+    predicted = cv.perspectiveTransform(prev_points.reshape(-1, 1, 2), homography)
+    refined = cv.cornerSubPix(gray, predicted.astype(np.float32), (11, 11), (-1, -1), SUBPIX_CRITERIA)
+    if not _points_are_inside_image(refined, gray.shape[1], gray.shape[0]):
+        return False, None
+    return True, refined
+
+
+def _detect_chessboard(
+    gray: np.ndarray,
+    board_pattern: tuple[int, int],
+) -> tuple[bool, np.ndarray | None, bool]:
+    prev_points = _runtime_state.get("prev_points")
+    if prev_points is not None:
+        roi = _build_tracking_roi(prev_points, gray.shape[1], gray.shape[0])
+        if roi is not None:
+            x0, y0, x1, y1 = roi
+            cropped = gray[y0:y1, x0:x1]
+            complete, pts = _find_chessboard(cropped, board_pattern)
+            if complete and pts is not None:
+                pts[:, 0, 0] += x0
+                pts[:, 0, 1] += y0
+                return True, pts, True
+
+    complete, pts = _find_chessboard(gray, board_pattern)
+    return complete, pts, False
+
+
+def _build_tracking_roi(
+    points: np.ndarray,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int] | None:
+    flat = points.reshape(-1, 2)
+    min_xy = flat.min(axis=0)
+    max_xy = flat.max(axis=0)
+    box_w = max_xy[0] - min_xy[0]
+    box_h = max_xy[1] - min_xy[1]
+    margin_x = max(box_w * ROI_MARGIN_RATIO, 24.0)
+    margin_y = max(box_h * ROI_MARGIN_RATIO, 24.0)
+
+    x0 = int(max(np.floor(min_xy[0] - margin_x), 0))
+    y0 = int(max(np.floor(min_xy[1] - margin_y), 0))
+    x1 = int(min(np.ceil(max_xy[0] + margin_x), width))
+    y1 = int(min(np.ceil(max_xy[1] + margin_y), height))
+    if x1 - x0 < 32 or y1 - y0 < 32:
+        return None
+    return x0, y0, x1, y1
+
+
+def _points_are_inside_image(points: np.ndarray, width: int, height: int) -> bool:
+    flat = points.reshape(-1, 2)
+    return bool(
+        np.all(flat[:, 0] >= 0)
+        and np.all(flat[:, 0] < width)
+        and np.all(flat[:, 1] >= 0)
+        and np.all(flat[:, 1] < height)
+    )
 
 
 def _validate_board_geometry(board_cols: int, board_rows: int, square_size_mm: float) -> None:
